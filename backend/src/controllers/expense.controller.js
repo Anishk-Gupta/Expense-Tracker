@@ -165,8 +165,8 @@ const updateExpense = asyncHandler(async (req, res, next) => {
   }
 
   if (date !== undefined) {
-    if(typeof date !=="string"){
-        throw new apiError(400,"Date must be a string in YYYY--MM--DD format")
+    if (typeof date !== "string") {
+      throw new apiError(400, "Date must be a string in YYYY--MM--DD format");
     }
 
     const trimmedDate = date.trim();
@@ -209,26 +209,195 @@ const updateExpense = asyncHandler(async (req, res, next) => {
     .json(new apiResponse(200, updatedExpense, "Expense updated successfully"));
 });
 
-const deleteExpense = asyncHandler(async(req,res,next)=>{
-    const {id} = req.params
-    // id validation
-    if(!mongoose.Types.ObjectId.isValid(id)){
-        throw new apiError(400,"Invalid expense ID")
+const deleteExpense = asyncHandler(async (req, res, next) => {
+  const { id } = req.params;
+  // id validation
+  if (!mongoose.Types.ObjectId.isValid(id)) {
+    throw new apiError(400, "Invalid expense ID");
+  }
+
+  const deletedExpense = await Expense.findOneAndDelete({
+    owner: req.user._id,
+    _id: id,
+  });
+
+  if (!deletedExpense) {
+    throw new apiError(404, "Expense not found");
+  }
+
+  return res
+    .status(200)
+    .json(
+      new apiResponse(
+        200,
+        { deletedExpenseId: deletedExpense._id },
+        "Expense deleted successfully",
+      ),
+    );
+});
+
+const getExpenseSummary = asyncHandler(async (req, res, next) => {
+  const stats = await Expense.aggregate([
+    // stage 1 - Filter logged-in user
+    {
+      $match: {
+        owner: new mongoose.Types.ObjectId(req.user._id),
+      },
+    },
+    // stage 2- Group & math
+    {
+      $group: {
+        _id: null,
+        totalSpent: { $sum: "$amount" },
+        avgExpense: { $avg: "$amount" },
+        maxExpense: { $max: "$amount" },
+        minExpense: { $min: "$amount" },
+        totalCount: { $sum: 1 },
+      },
+    },
+    // clean response
+    {
+      $project: {
+        _id: 0,
+        totalSpent: 1,
+        avgExpense: { $round: ["$avgExpense", 2] },
+        maxExpense: 1,
+        minExpense: 1,
+        totalCount: 1,
+      },
+    },
+  ]);
+  const summary = stats[0] || {
+    totalSpent: 0,
+    avgExpense: 0,
+    maxExpense: 0,
+    minExpense: 0,
+    totalCount: 0,
+  };
+
+  return res
+    .status(200)
+    .json(
+      new apiResponse(200, summary, "Expense summary fetched successfully"),
+    );
+});
+
+const getCategoryStats = asyncHandler(async (req, res, next) => {
+  const { startDate, endDate } = req.query;
+
+  // base match condition
+  const matchCondition = {
+    owner: new mongoose.Types.ObjectId(req.user._id),
+  };
+
+  // 2. optimal date range filter
+  if (startDate || endDate) {
+    matchCondition.date = {};
+    if (startDate) matchCondition.date.$gte = new Date(startDate);
+    if (endDate) matchCondition.date.$lte = new Date(endDate);
+  }
+
+  const categoryStats = await Expense.aggregate([
+    {
+      $match: matchCondition,
+    },
+    {
+      $group: {
+        _id: "$category",
+        totalSpent: { $sum: "$amount" },
+        count: { $sum: 1 },
+      },
+    },
+    {
+      $sort: {
+        totalSpent: -1,
+      },
+    },
+    {
+      $project: {
+        _id: 0,
+        category: "$_id",
+        totalSpent: 1,
+        count: 1,
+      },
+    },
+  ]);
+
+  return res
+    .status(200)
+    .json(
+      new apiResponse(
+        200,
+        categoryStats,
+        "Category stats fetched successfully",
+      ),
+    );
+});
+
+const getMonthlyTrends = asyncHandler(async (req, res, next) => {
+  const { year } = req.query;
+
+  // 1. base match condition
+  const matchCondition = {
+    owner: new mongoose.Types.ObjectId(req.user._id),
+  };
+
+  if (year) {
+    const yearNumber = parseInt(year, 10);
+    if (isNaN(yearNumber) || yearNumber < 2000 || yearNumber > 2100) {
+      throw new apiError(400, "Invalid year provided");
     }
+    const startOfYear = new Date(`${yearNumber}-01-01T00:00:00.000Z`);
+    const endOfYear = new Date(`${yearNumber}-12-31T23:59:59.999Z`);
 
-    const deletedExpense = await Expense.findOneAndDelete({
-        owner : req.user._id,
-        _id : id
-    })
-
-    if(!deletedExpense){
-        throw new apiError(404,"Expense not found")
+    matchCondition.date = {
+      $gte: startOfYear,
+      $lte: endOfYear,
+    };
+  }
+  const monthlyTrends = await Expense.aggregate([
+    {
+        $match : matchCondition
+    },
+    {
+        $group : {
+            _id : {
+                year : {$year : "$date"},
+                month : {$month : "$date"}
+            },
+            totalSpent : {$sum : "$amount"},
+            avgExpense : {$avg : "$amount"},
+            count : {$sum : 1}
+        }
+    },
+    {
+        $sort : {
+            "_id.year" : 1,
+            "_id.month" : 1
+        }
+    },
+    {
+        $project : {
+            _id : 0,
+            year : "$_id.year",
+            month : "$_id.month",
+            totalSpent : 1,
+            avgExpense : {$round : ["$avgExpense",2]},
+            count : 1
+        }
     }
-
-    return res.status(200).json(
-        new apiResponse(200,{deletedExpenseId : deletedExpense._id},"Expense deleted successfully")
-    )
-})
-
-
-export { addExpense, getAllExpenses, getExpenseById, updateExpense , deleteExpense};
+  ])
+  return res.status(200).json(
+    new apiResponse(200,monthlyTrends,"Monthly trends fetched successfully")
+  )
+});
+export {
+  addExpense,
+  getAllExpenses,
+  getExpenseById,
+  updateExpense,
+  deleteExpense,
+  getExpenseSummary,
+  getCategoryStats,
+  getMonthlyTrends
+};
