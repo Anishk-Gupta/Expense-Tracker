@@ -21,12 +21,15 @@ const userSchema = new mongoose.Schema({
         lowercase : true,
         unique : true,
         trim : true,
-        match: [/^\S+@\S+\.\S+$/, "Please enter a valid email address"]
+        match: [/^[^\s@]+@[^\s@]+\.[^\s@]+$/, "Please enter a valid email address"]
     },
     password : {
         type : String,
         required : [true,"password is required"]
 
+    },
+    refreshToken : {
+        type : String
     }
 },{timestamps : true})
 
@@ -39,7 +42,7 @@ userSchema.methods.comparePassword = async function(enteredPassword){
     return await bcrypt.compare(enteredPassword,this.password)
 }
 
-userSchema.methods.generateToken = function(){
+userSchema.methods.generateAccessToken = function(){
     return jwt.sign(
         {
             _id : this._id,
@@ -48,6 +51,16 @@ userSchema.methods.generateToken = function(){
         },
         process.env.JWT_SECRET,
         {expiresIn : process.env.JWT_EXPIRY}
+    )
+}
+
+userSchema.methods.generateRefreshToken = async function(){
+    return jwt.sign(
+        {
+            _id : this._id
+        },
+        process.env.REFRESH_TOKEN_SECRET,
+        {expiresIn : process.env.REFRESH_TOKEN_EXPIRY}
     )
 }
 

@@ -7,29 +7,74 @@ import mongoose from "mongoose";
 const addExpense = asyncHandler(async (req, res, next) => {
   const { amount, description, date, category } = req.body;
 
+  // 1. Amount Validation
   if (amount === undefined || amount === null) {
     throw new apiError(400, "Amount is required");
   }
   if (typeof amount !== "number" || amount <= 0) {
-    throw new apiError(400, "Amount must be a postive number");
+    throw new apiError(400, "Amount must be a positive number");
   }
 
-  if (!category?.trim()) {
-    throw new apiError(400, "Category is required");
+  // 2. Category Validation (Type check + Trim)
+  if (!category || typeof category !== "string" || !category.trim()) {
+    throw new apiError(400, "Category is required and must be valid text");
   }
+  
+  const trimmedCategory = category.trim();
+  const allowedCategories = ["Food", "Travel", "Shopping", "Entertainment", "Bills", "Health", "Others"];
+  
+  if (!allowedCategories.includes(trimmedCategory)) {
+    throw new apiError(400, "Invalid category selected");
+  }
+
+  // 3. Date Validation (Type check + Trim + Logic)
+  let finalDate = Date.now(); // Default aaj ki date
 
   if (date) {
-    const parsedDate = new Date(date);
-    if (isNaN(parsedDate.getTime())) {
-      throw new apiError(400, "Invalid date format");
+    if (typeof date !== "string") {
+      throw new apiError(400, "Date must be a string");
+    }
+
+    const trimmedDate = date.trim(); // Space hataya taaki user confuse na ho
+    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+    
+    if (!dateRegex.test(trimmedDate)) {
+      throw new apiError(400, "Date must be strictly in YYYY-MM-DD format");
+    }
+
+    const parsedDate = new Date(trimmedDate);
+    if (
+      isNaN(parsedDate.getTime()) ||
+      parsedDate.toISOString().slice(0, 10) !== trimmedDate
+    ) {
+      throw new apiError(400, "Invalid calendar date provided");
+    }
+
+    const year = parsedDate.getFullYear();
+    if (year < 2000 || year > 2100) {
+      throw new apiError(400, "Expense year must be between 2000 and 2100");
+    }
+
+    if (parsedDate > new Date()) {
+      throw new apiError(400, "Expense date cannot be in the future");
+    }
+    
+    finalDate = parsedDate; // Agar sab sahi hai toh final date update kar do
+  }
+
+  // description validation
+  if(description !== undefined && description !== null) {
+    if (typeof description !== "string") {
+      throw new apiError(400, "Description must be a valid text string");
     }
   }
 
+  // 4. Create Expense
   const expense = await Expense.create({
     amount,
-    description: description?.trim() || "",
-    date: date || Date.now(),
-    category: category.trim(),
+    description: description ? description.trim() : "",
+    date: finalDate,
+    category: trimmedCategory,
     owner: req.user._id,
   });
 
@@ -53,30 +98,73 @@ const getAllExpenses = asyncHandler(async (req, res, next) => {
   // 1 . Base query - Authenticated query
   const query = { owner: req.user._id };
 
-  //2 .  filter by category(case-insensitive)
-  if (category) {
-    query.category = { $regex: new RegExp(`^${category}$`, "i") };
+  // 2 . filter by category (Crash-proof & Space handle)
+  if (typeof category === "string" && category.trim()) {
+    query.category = category.trim();
   }
 
-  // 3.  filter by dateRange
-  if (startDate || endDate) {
+  // 3. filter by dateRange
+  // Lenient Date Filtering (Galat date aane par ignore karega, error nahi dega)
+  let start, end;
+  const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+
+  // 1. Validate startDate safely
+  if (typeof startDate === "string" && dateRegex.test(startDate.trim())) {
+    const trimmedStart = startDate.trim();
+    const parsedStart = new Date(trimmedStart);
+    if (!isNaN(parsedStart.getTime()) && parsedStart.toISOString().slice(0, 10) === trimmedStart) {
+      start = parsedStart;
+    }
+  }
+
+  // 2. Validate endDate safely
+  if (typeof endDate === "string" && dateRegex.test(endDate.trim())) {
+    const trimmedEnd = endDate.trim();
+    const parsedEnd = new Date(trimmedEnd);
+    if (!isNaN(parsedEnd.getTime()) && parsedEnd.toISOString().slice(0, 10) === trimmedEnd) {
+      parsedEnd.setUTCHours(23, 59, 59, 999);
+      end = parsedEnd;
+    }
+  }
+
+  // 3. Agar dono valid hain, par start > end hai (ultaa range), toh dono ko ignore kar do
+  if (start && end && start > end) {
+    start = undefined;
+    end = undefined;
+  }
+
+  // 4. Sirf tabhi query.date lagao jab kam se kam ek valid date mili ho!
+  if (start || end) {
     query.date = {};
-    if (startDate) query.date.$gte = new Date(startDate);
-    if (endDate) query.date.$lte = new Date(endDate);
+    if (start) query.date.$gte = start;
+    if (end) query.date.$lte = end;
   }
 
-  // 4. search in description
-  if (search) {
-    query.description = { $regex: search, $options: "i" };
+  // 4. search in description (Array crash protection)
+  if (typeof search === "string" && search.trim()) {
+    const safeSearch = search.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    query.description = { $regex: safeSearch, $options: "i" };
   }
 
   // 5. pagination Math
   const pageNumber = Math.max(1, parseInt(page, 10) || 1);
   const limitNumber = Math.min(100, Math.max(1, parseInt(limit, 10) || 10));
+  // YAHAN MINUS LAGA DIYA HAI
   const skip = (pageNumber - 1) * limitNumber;
 
-  //6. sorting
-  const sort = { [sortBy]: sortType === "asc" ? 1 : -1 };
+  // 6. sorting (Array crash protection for sortBy & sortType)
+  const allowedSortFields = ["date", "amount", "category"];
+  const safeSortBy = typeof sortBy === "string" ? sortBy.trim() : "date";
+  const safeSortType = typeof sortType === "string" ? sortType.trim() : "desc";
+  
+  const actualSortBy = allowedSortFields.includes(safeSortBy) ? safeSortBy : "date";
+  const sort = { [actualSortBy]: safeSortType === "asc" ? 1 : -1 };
+
+  // Secondary sort: Agar amount/category se sort ho raha hai, toh same value walon ko date ke hisaab se descending rakho
+  if (actualSortBy !== "date") {
+    sort.date = -1; 
+  }
+
   // 7. parallel queries
   const [expenses, totalExpenses] = await Promise.all([
     Expense.find(query).sort(sort).skip(skip).limit(limitNumber),
@@ -107,6 +195,7 @@ const getAllExpenses = asyncHandler(async (req, res, next) => {
 
 const getExpenseById = asyncHandler(async (req, res, next) => {
   const { id } = req.params;
+   id = id?.trim();
 
   // id mongoose id ki tarah hai bhi nhi
   if (!mongoose.Types.ObjectId.isValid(id)) {
@@ -128,68 +217,103 @@ const getExpenseById = asyncHandler(async (req, res, next) => {
 });
 
 const updateExpense = asyncHandler(async (req, res, next) => {
-  const { id } = req.params;
+  let { id } = req.params;
   const { category, description, amount, date } = req.body || {};
-  // validation
+  
+  id = id?.trim();
+
+  // 1. Validation for ID
   if (!mongoose.Types.ObjectId.isValid(id)) {
     throw new apiError(400, "Invalid expense ID");
   }
 
-  if (
-    category === undefined &&
-    description === undefined &&
-    amount === undefined &&
-    date === undefined
-  ) {
+  // 2. Agar request body ekdum khali hai
+  if (category === undefined && amount === undefined && description === undefined && date === undefined) {
     throw new apiError(400, "At least one field is required to update");
   }
-  // dynamic update data ka object
+
+  // Dynamic update data ka object
   const updateData = {};
+
+  // 3. Category Validation (Crash-proof + Enum check)
   if (category !== undefined) {
-    const trimedCategory = category?.trim();
-    if (!trimedCategory) {
+    // Sirf pure string allow karega (null, number, array sab reject)
+    if (typeof category !== "string") {
+      throw new apiError(400, "Category must be a valid text string");
+    }
+
+    const trimmedCategory = category.trim();
+    
+    if (!trimmedCategory) {
       throw new apiError(400, "Category cannot be empty");
     }
-    updateData.category = trimedCategory;
+
+    const allowedCategories = [
+      "Food",
+      "Travel",
+      "Shopping",
+      "Entertainment",
+      "Bills",
+      "Health",
+      "Others"
+    ];
+    
+    if (!allowedCategories.includes(trimmedCategory)) {
+      throw new apiError(400, "Invalid category selected");
+    }
+    
+    updateData.category = trimmedCategory;
   }
 
+  // 4. Amount Validation (Crash-proof)
   if (amount !== undefined) {
-    if (amount <= 0 || typeof amount !== "number") {
-      throw new apiError(400, "Amount must be a positive number");
+    if (amount === null || typeof amount !== "number" || amount <= 0) {
+      throw new apiError(400, "Amount must be a valid positive number");
     }
     updateData.amount = amount;
   }
 
-  if (description !== undefined) {
-    updateData.description = description?.trim() || "";
+  // 5. Description Validation (Array crash protection)
+  if(description !== undefined){
+    if(typeof description !== "string"){
+      throw new apiError(400,"description must be a valid test string")
+    }
+    updateData.description = description.trim();
   }
 
+  // 6. Date Validation (Crash-proof + Logic + Year boundaries)
   if (date !== undefined) {
-    if (typeof date !== "string") {
-      throw new apiError(400, "Date must be a string in YYYY--MM--DD format");
+    if (date === null || !String(date).trim()) {
+      throw new apiError(400, "Date cannot be empty or null");
     }
 
-    const trimmedDate = date.trim();
-
-    if (!trimmedDate) {
-      throw new apiError(400, "Date cannot be empty");
-    }
-
+    const trimmedDate = String(date).trim();
     const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
-    if (typeof trimmedDate === "string" && !dateRegex.test(trimmedDate)) {
-      throw new apiError(
-        400,
-        "Invalid date format. Use YYYY-MM-DD (e.g., 2026-10-15)",
-      );
+    
+    if (!dateRegex.test(trimmedDate)) {
+      throw new apiError(400, "Date must be strictly in YYYY-MM-DD format");
     }
+
     const parsedDate = new Date(trimmedDate);
-    if (isNaN(parsedDate.getTime())) {
-      throw new apiError(400, "Invalid date . Please provide a valid date");
+    if (
+      isNaN(parsedDate.getTime()) ||
+      parsedDate.toISOString().slice(0, 10) !== trimmedDate
+    ) {
+      throw new apiError(400, "Invalid calendar date provided");
+    }
+
+    const year = parsedDate.getFullYear();
+    if (year < 2000 || year > 2100) {
+      throw new apiError(400, "Expense year must be between 2000 and 2100");
+    }
+    if (parsedDate > new Date()) {
+      throw new apiError(400, "Expense date cannot be in the future");
     }
 
     updateData.date = parsedDate;
   }
 
+  // 7. Database Update Operation
   const updatedExpense = await Expense.findOneAndUpdate(
     {
       _id: id,
@@ -201,8 +325,13 @@ const updateExpense = asyncHandler(async (req, res, next) => {
     {
       new: true,
       runValidators: true,
-    },
+    }
   );
+
+  // 8. Not Found Check (Very Important)
+  if (!updatedExpense) {
+    throw new apiError(404, "Expense not found or you don't have permission to update it");
+  }
 
   return res
     .status(200)
@@ -210,7 +339,8 @@ const updateExpense = asyncHandler(async (req, res, next) => {
 });
 
 const deleteExpense = asyncHandler(async (req, res, next) => {
-  const { id } = req.params;
+  let { id } = req.params;
+  id = id?.trim();
   // id validation
   if (!mongoose.Types.ObjectId.isValid(id)) {
     throw new apiError(400, "Invalid expense ID");
@@ -290,11 +420,41 @@ const getCategoryStats = asyncHandler(async (req, res, next) => {
     owner: new mongoose.Types.ObjectId(req.user._id),
   };
 
-  // 2. optimal date range filter
-  if (startDate || endDate) {
+  // 3. filter by dateRange
+  // Lenient Date Filtering (Galat date aane par ignore karega, error nahi dega)
+  let start, end;
+  const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+
+  // 1. Validate startDate safely
+  if (typeof startDate === "string" && dateRegex.test(startDate.trim())) {
+    const trimmedStart = startDate.trim();
+    const parsedStart = new Date(trimmedStart);
+    if (!isNaN(parsedStart.getTime()) && parsedStart.toISOString().slice(0, 10) === trimmedStart) {
+      start = parsedStart;
+    }
+  }
+
+  // 2. Validate endDate safely
+  if (typeof endDate === "string" && dateRegex.test(endDate.trim())) {
+    const trimmedEnd = endDate.trim();
+    const parsedEnd = new Date(trimmedEnd);
+    if (!isNaN(parsedEnd.getTime()) && parsedEnd.toISOString().slice(0, 10) === trimmedEnd) {
+      parsedEnd.setUTCHours(23, 59, 59, 999);
+      end = parsedEnd;
+    }
+  }
+
+  // 3. Agar dono valid hain, par start > end hai (ultaa range), toh dono ko ignore kar do
+  if (start && end && start > end) {
+    start = undefined;
+    end = undefined;
+  }
+
+  // 4. Sirf tabhi query.date lagao jab kam se kam ek valid date mili ho!
+  if (start || end) {
     matchCondition.date = {};
-    if (startDate) matchCondition.date.$gte = new Date(startDate);
-    if (endDate) matchCondition.date.$lte = new Date(endDate);
+    if (start) matchCondition.date.$gte = start;
+    if (end) matchCondition.date.$lte = end;
   }
 
   const categoryStats = await Expense.aggregate([
@@ -342,54 +502,63 @@ const getMonthlyTrends = asyncHandler(async (req, res, next) => {
     owner: new mongoose.Types.ObjectId(req.user._id),
   };
 
-  if (year) {
-    const yearNumber = parseInt(year, 10);
-    if (isNaN(yearNumber) || yearNumber < 2000 || yearNumber > 2100) {
-      throw new apiError(400, "Invalid year provided");
+  if (typeof year === "string") {
+    const parsedYear = Number(year);
+    if (
+      !isNaN(parsedYear) &&
+      Number.isInteger(parsedYear) &&
+      parsedYear > 2000 &&
+      parsedYear < 2100
+    ) {
+       const startOfYear = new Date(`${parsedYear}-01-01T00:00:00.000Z`);
+      const endOfYear = new Date(`${parsedYear}-12-31T23:59:59.999Z`);
+      matchCondition.date = {
+        $gte : startOfYear,
+        $lte : endOfYear
+      }
     }
-    const startOfYear = new Date(`${yearNumber}-01-01T00:00:00.000Z`);
-    const endOfYear = new Date(`${yearNumber}-12-31T23:59:59.999Z`);
-
-    matchCondition.date = {
-      $gte: startOfYear,
-      $lte: endOfYear,
-    };
   }
   const monthlyTrends = await Expense.aggregate([
     {
-        $match : matchCondition
+      $match: matchCondition,
     },
     {
-        $group : {
-            _id : {
-                year : {$year : "$date"},
-                month : {$month : "$date"}
-            },
-            totalSpent : {$sum : "$amount"},
-            avgExpense : {$avg : "$amount"},
-            count : {$sum : 1}
-        }
+      $group: {
+        _id: {
+          year: { $year: "$date" },
+          month: { $month: "$date" },
+        },
+        totalSpent: { $sum: "$amount" },
+        avgExpense: { $avg: "$amount" },
+        count: { $sum: 1 },
+      },
     },
     {
-        $sort : {
-            "_id.year" : 1,
-            "_id.month" : 1
-        }
+      $sort: {
+        "_id.year": 1,
+        "_id.month": 1,
+      },
     },
     {
-        $project : {
-            _id : 0,
-            year : "$_id.year",
-            month : "$_id.month",
-            totalSpent : 1,
-            avgExpense : {$round : ["$avgExpense",2]},
-            count : 1
-        }
-    }
-  ])
-  return res.status(200).json(
-    new apiResponse(200,monthlyTrends,"Monthly trends fetched successfully")
-  )
+      $project: {
+        _id: 0,
+        year: "$_id.year",
+        month: "$_id.month",
+        totalSpent: 1,
+        avgExpense: { $round: ["$avgExpense", 2] },
+        count: 1,
+      },
+    },
+  ]);
+  return res
+    .status(200)
+    .json(
+      new apiResponse(
+        200,
+        monthlyTrends,
+        "Monthly trends fetched successfully",
+      ),
+    );
 });
 export {
   addExpense,
@@ -399,5 +568,5 @@ export {
   deleteExpense,
   getExpenseSummary,
   getCategoryStats,
-  getMonthlyTrends
+  getMonthlyTrends,
 };

@@ -4,13 +4,11 @@ import jwt from "jsonwebtoken"
 import { User } from "../models/user.model.js"
 const verifyJWT = asyncHandler(async (req , _ , next) => {
     try {
-        const authHeader = req.headers["authorization"]
-    
-        if(!authHeader || !authHeader.startsWith("Bearer ")){
-            throw new apiError(401 , "Unauthorized Error");
+        const token = req.cookies?.accessToken || req.header("Authorization")?.replace("Bearer ","");
+
+        if(!token){
+            throw new apiError(401,"Unauthorized request")
         }
-    
-        const token = authHeader.split(" ")[1];
     
         const decodedToken = jwt.verify(token,process.env.JWT_SECRET)
     

@@ -4,7 +4,8 @@ const expenseSchema = new mongoose.Schema({
     category : {
         type : String,
         required : true,
-        trim : true
+        trim : true,
+        enum : ["Food", "Travel", "Shopping", "Entertainment", "Bills", "Health", "Others"]
     },
     amount : {
         type : Number,
